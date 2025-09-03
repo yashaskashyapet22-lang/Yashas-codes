@@ -1,0 +1,63 @@
+package com.example.demo;
+
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.http.*;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@SpringBootApplication
+public class DemoApplication implements CommandLineRunner {
+
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Override
+    public void run(String... args) throws Exception {
+        // Step 1: Send POST request to generate webhook
+        String generateWebhookUrl = "https://bfhldevapigw.healthrx.co.in/hiring/generateWebhook/JAVA";
+
+        Map<String, String> generateRequestBody = new HashMap<>();
+        generateRequestBody.put("name", "John Doe");
+        generateRequestBody.put("regNo", "REG12347");   // Odd number last two digits: 47
+        generateRequestBody.put("email", "john@example.com");
+
+        HttpHeaders generateHeaders = new HttpHeaders();
+        generateHeaders.setContentType(MediaType.APPLICATION_JSON);
+
+        HttpEntity<Map<String, String>> generateEntity = new HttpEntity<>(generateRequestBody, generateHeaders);
+
+        ResponseEntity<Map> generateResponse = restTemplate.postForEntity(generateWebhookUrl, generateEntity, Map.class);
+
+        // Extract webhookUrl and accessToken from response
+        String webhookUrl = (String) generateResponse.getBody().get("webhookUrl");
+        String accessToken = (String) generateResponse.getBody().get("accessToken");
+
+        System.out.println("Webhook URL: " + webhookUrl);
+        System.out.println("Access Token: " + accessToken);
+
+        // Step 2: Solve SQL problem manually based on regNo last two digits
+        // For Odd (47), question 1 should be solved. Assume solved SQL is assigned here:
+        String finalSqlQuery = "SELECT department, COUNT(*) FROM employees GROUP BY department;";
+
+        // Step 3: Submit SQL solution using webhook URL and JWT token in Authorization header
+        HttpHeaders submitHeaders = new HttpHeaders();
+        submitHeaders.setContentType(MediaType.APPLICATION_JSON);
+        submitHeaders.setBearerAuth(accessToken);
+
+        Map<String, String> submitBody = new HashMap<>();
+        submitBody.put("finalQuery", finalSqlQuery);
+
+        HttpEntity<Map<String, String>> submitEntity = new HttpEntity<>(submitBody, submitHeaders);
+
+        ResponseEntity<String> submitResponse = restTemplate.postForEntity(webhookUrl, submitEntity, String.class);
+
+        System.out.println("Final Submission Response: " + submitResponse.getBody());
+    }
+}
