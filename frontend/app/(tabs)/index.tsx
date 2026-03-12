@@ -1,17 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Dimensions } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ThemedView } from '../../src/components/ThemedView';
 import { ThemedText } from '../../src/components/ThemedText';
 import { Card } from '../../src/components/Card';
-import { Button } from '../../src/components/Button';
-import { SkillBadge } from '../../src/components/SkillBadge';
 import { useAuthStore } from '../../src/stores/authStore';
 import { useThemeStore, getTheme } from '../../src/stores/themeStore';
 import { api } from '../../src/utils/api';
-import { Project, Team, TeamInvite } from '../../src/types';
+import { Project, User } from '../../src/types';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+
+const { width } = Dimensions.get('window');
 
 export default function Home() {
   const router = useRouter();
@@ -19,22 +19,19 @@ export default function Home() {
   const isDark = useThemeStore((state) => state.isDark);
   const theme = getTheme(isDark);
   
-  const [recentProjects, setRecentProjects] = useState<Project[]>([]);
-  const [myTeams, setMyTeams] = useState<Team[]>([]);
-  const [invites, setInvites] = useState<TeamInvite[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
     try {
-      const [projectsData, teamsData, invitesData] = await Promise.all([
+      const [projectsData, usersData] = await Promise.all([
         api.getProjects({ status: 'open' }),
-        api.getTeams(),
-        api.getInvites(),
+        api.getUsers().catch(() => []),
       ]);
-      setRecentProjects(projectsData.slice(0, 3));
-      setMyTeams(teamsData);
-      setInvites(invitesData);
+      setProjects(projectsData);
+      setUsers(usersData);
     } catch (error) {
       console.error('Load data error:', error);
     } finally {
@@ -52,14 +49,63 @@ export default function Home() {
     loadData();
   };
 
-  const handleRespondInvite = async (inviteId: string, action: 'accept' | 'decline') => {
-    try {
-      await api.respondToInvite(inviteId, action);
-      loadData();
-    } catch (error) {
-      console.error('Respond invite error:', error);
-    }
-  };
+  const stats = [
+    { 
+      label: 'Active Users', 
+      value: users.length.toString(), 
+      icon: 'people',
+      gradient: ['#3B82F6', '#06B6D4']
+    },
+    { 
+      label: 'Projects', 
+      value: projects.length.toString(), 
+      icon: 'briefcase',
+      gradient: ['#8B5CF6', '#EC4899']
+    },
+    { 
+      label: 'Open Positions', 
+      value: projects.reduce((acc, p) => acc + (p.team_size - p.current_members), 0).toString(), 
+      icon: 'sparkles',
+      gradient: ['#10B981', '#34D399']
+    },
+    { 
+      label: 'Categories', 
+      value: '4', 
+      icon: 'grid',
+      gradient: ['#F59E0B', '#EF4444']
+    },
+  ];
+
+  const quickActions = [
+    {
+      title: 'Edit Profile',
+      description: 'Update your skills and experience',
+      icon: 'person',
+      route: '/(tabs)/profile',
+      gradient: ['#3B82F6', '#06B6D4']
+    },
+    {
+      title: 'Browse Projects',
+      description: 'Find exciting projects to join',
+      icon: 'folder',
+      route: '/(tabs)/projects',
+      gradient: ['#8B5CF6', '#EC4899']
+    },
+    {
+      title: 'AI Team Builder',
+      description: 'Let AI find your perfect team',
+      icon: 'sparkles',
+      route: '/(tabs)/ai-builder',
+      gradient: ['#10B981', '#34D399']
+    },
+  ];
+
+  const howItWorks = [
+    { step: '1', title: 'Create Profile', desc: 'Add your skills and experience' },
+    { step: '2', title: 'Browse Projects', desc: 'Find projects that match your interests' },
+    { step: '3', title: 'Get Matched', desc: 'AI finds the best teammates for you' },
+    { step: '4', title: 'Build Together', desc: 'Collaborate and create amazing things' },
+  ];
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }} edges={['top']}>
@@ -73,181 +119,141 @@ export default function Home() {
           />
         }
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <View>
-            <ThemedText variant="secondary" size="sm">Welcome back,</ThemedText>
-            <ThemedText size="xl" weight="bold">{user?.name || 'User'}</ThemedText>
-          </View>
-          <TouchableOpacity 
-            style={[styles.avatar, { backgroundColor: theme.surfaceVariant }]}
-            onPress={() => router.push('/(tabs)/profile')}
-          >
-            {user?.picture ? (
-              <View style={styles.avatarImage}>
-                <ThemedText size="lg" weight="bold">
-                  {user.name?.charAt(0).toUpperCase()}
-                </ThemedText>
+        {/* Hero Section */}
+        <View style={styles.hero}>
+          <ThemedText size="2xl" weight="bold" style={styles.heroTitle}>
+            Welcome Back! 👋
+          </ThemedText>
+          <ThemedText variant="secondary" size="lg">
+            Ready to build amazing teams today?
+          </ThemedText>
+        </View>
+
+        {/* Stats Grid */}
+        <View style={styles.statsGrid}>
+          {stats.map((stat, index) => (
+            <View key={index} style={[styles.statCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              <View style={styles.statContent}>
+                <View>
+                  <ThemedText variant="secondary" size="sm">{stat.label}</ThemedText>
+                  <ThemedText size="2xl" weight="bold">{stat.value}</ThemedText>
+                </View>
+                <LinearGradient
+                  colors={stat.gradient as [string, string]}
+                  style={styles.statIcon}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                >
+                  <Ionicons name={stat.icon as any} size={24} color="#FFFFFF" />
+                </LinearGradient>
               </View>
-            ) : (
-              <Ionicons name="person" size={24} color={theme.textSecondary} />
-            )}
-          </TouchableOpacity>
+            </View>
+          ))}
         </View>
 
         {/* Quick Actions */}
-        <View style={styles.quickActions}>
-          <QuickActionCard
-            icon="add-circle"
-            title="Create Project"
-            onPress={() => router.push('/project/create')}
-          />
-          <QuickActionCard
-            icon="sparkles"
-            title="AI Team Builder"
-            onPress={() => router.push('/(tabs)/ai-builder')}
-          />
+        <View style={styles.section}>
+          <ThemedText size="xl" weight="bold" style={styles.sectionTitle}>
+            Quick Actions
+          </ThemedText>
+          <View style={styles.actionsGrid}>
+            {quickActions.map((action, index) => (
+              <TouchableOpacity
+                key={index}
+                style={[styles.actionCard, { backgroundColor: theme.card, borderColor: theme.border }]}
+                onPress={() => router.push(action.route as any)}
+                activeOpacity={0.7}
+              >
+                <LinearGradient
+                  colors={action.gradient as [string, string]}
+                  style={styles.actionIcon}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                >
+                  <Ionicons name={action.icon as any} size={24} color="#FFFFFF" />
+                </LinearGradient>
+                <ThemedText weight="semibold" style={styles.actionTitle}>
+                  {action.title}
+                </ThemedText>
+                <ThemedText variant="secondary" size="sm">
+                  {action.description}
+                </ThemedText>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
-        {/* Pending Invites */}
-        {invites.length > 0 && (
-          <View style={styles.section}>
-            <ThemedText size="lg" weight="semibold" style={styles.sectionTitle}>
-              Pending Invites ({invites.length})
-            </ThemedText>
-            {invites.map((invite) => (
-              <Card key={invite.invite_id} style={styles.inviteCard}>
-                <View style={styles.inviteHeader}>
-                  <View style={[styles.inviteAvatar, { backgroundColor: theme.primary }]}>
-                    <ThemedText style={{ color: '#FFF' }} weight="bold">
-                      {invite.inviter?.name?.charAt(0) || 'U'}
-                    </ThemedText>
-                  </View>
-                  <View style={styles.inviteInfo}>
-                    <ThemedText weight="semibold">{invite.inviter?.name}</ThemedText>
-                    <ThemedText variant="secondary" size="sm">
-                      invited you to join {invite.project?.title}
-                    </ThemedText>
-                  </View>
-                </View>
-                {invite.message && (
-                  <ThemedText variant="secondary" size="sm" style={styles.inviteMessage}>
-                    "{invite.message}"
-                  </ThemedText>
-                )}
-                <View style={styles.inviteActions}>
-                  <Button
-                    title="Decline"
-                    variant="outline"
-                    size="sm"
-                    onPress={() => handleRespondInvite(invite.invite_id, 'decline')}
-                    style={{ flex: 1 }}
-                  />
-                  <Button
-                    title="Accept"
-                    size="sm"
-                    onPress={() => handleRespondInvite(invite.invite_id, 'accept')}
-                    style={{ flex: 1 }}
-                  />
-                </View>
-              </Card>
+        {/* How It Works */}
+        <Card style={styles.howItWorks}>
+          <View style={styles.howItWorksHeader}>
+            <Ionicons name="bulb" size={28} color="#F59E0B" />
+            <ThemedText size="xl" weight="bold">How It Works</ThemedText>
+          </View>
+          <View style={styles.stepsContainer}>
+            {howItWorks.map((item, index) => (
+              <View key={index} style={styles.stepItem}>
+                <LinearGradient
+                  colors={['#3B82F6', '#8B5CF6']}
+                  style={styles.stepNumber}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                >
+                  <ThemedText style={{ color: '#FFF' }} weight="bold">{item.step}</ThemedText>
+                </LinearGradient>
+                <ThemedText weight="semibold" style={styles.stepTitle}>{item.title}</ThemedText>
+                <ThemedText variant="secondary" size="sm" style={styles.stepDesc}>{item.desc}</ThemedText>
+              </View>
             ))}
           </View>
-        )}
-
-        {/* My Teams */}
-        {myTeams.length > 0 && (
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <ThemedText size="lg" weight="semibold">My Teams</ThemedText>
-              <ThemedText variant="secondary" size="sm">{myTeams.length} teams</ThemedText>
-            </View>
-            {myTeams.slice(0, 3).map((team) => (
-              <Card key={team.team_id} style={styles.teamCard}>
-                <View style={styles.teamHeader}>
-                  <View style={[styles.teamIcon, { backgroundColor: theme.surfaceVariant }]}>
-                    <Ionicons name="people" size={20} color={theme.primary} />
-                  </View>
-                  <View style={styles.teamInfo}>
-                    <ThemedText weight="semibold">{team.name}</ThemedText>
-                    <ThemedText variant="secondary" size="sm">
-                      {team.project?.title} • {team.members.length} members
-                    </ThemedText>
-                  </View>
-                </View>
-              </Card>
-            ))}
-          </View>
-        )}
+        </Card>
 
         {/* Recent Projects */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <ThemedText size="lg" weight="semibold">Open Projects</ThemedText>
-            <TouchableOpacity onPress={() => router.push('/(tabs)/projects')}>
-              <ThemedText style={{ color: theme.primary }} size="sm">See all</ThemedText>
-            </TouchableOpacity>
-          </View>
-          {recentProjects.length === 0 ? (
-            <Card>
-              <ThemedText variant="secondary" style={{ textAlign: 'center' }}>
-                No open projects yet. Create one!
-              </ThemedText>
-            </Card>
-          ) : (
-            recentProjects.map((project) => (
+        {projects.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <ThemedText size="xl" weight="bold">Recent Projects</ThemedText>
+              <TouchableOpacity onPress={() => router.push('/(tabs)/projects')}>
+                <ThemedText style={{ color: theme.primary }}>See all</ThemedText>
+              </TouchableOpacity>
+            </View>
+            {projects.slice(0, 3).map((project) => (
               <Card 
                 key={project.project_id} 
                 style={styles.projectCard}
                 onPress={() => router.push(`/project/${project.project_id}`)}
               >
                 <View style={styles.projectHeader}>
-                  <View style={[styles.categoryBadge, { backgroundColor: theme.surfaceVariant }]}>
+                  <View style={[styles.categoryBadge, { backgroundColor: theme.primary + '20' }]}>
                     <ThemedText size="xs" style={{ color: theme.primary }}>
                       {project.category.replace('_', ' ')}
                     </ThemedText>
                   </View>
-                  <ThemedText variant="secondary" size="xs">
-                    {project.current_members}/{project.team_size} members
-                  </ThemedText>
+                  <View style={styles.memberCount}>
+                    <Ionicons name="people-outline" size={14} color={theme.textSecondary} />
+                    <ThemedText variant="secondary" size="xs">
+                      {project.current_members}/{project.team_size}
+                    </ThemedText>
+                  </View>
                 </View>
-                <ThemedText weight="semibold" style={styles.projectTitle}>
-                  {project.title}
-                </ThemedText>
+                <ThemedText weight="semibold" size="lg">{project.title}</ThemedText>
                 <ThemedText variant="secondary" size="sm" numberOfLines={2}>
                   {project.description}
                 </ThemedText>
                 <View style={styles.skillsRow}>
                   {project.required_skills.slice(0, 3).map((skill, idx) => (
-                    <SkillBadge key={idx} name={skill} variant="outline" />
+                    <View key={idx} style={[styles.skillBadge, { backgroundColor: theme.surfaceVariant }]}>
+                      <ThemedText size="xs">{skill}</ThemedText>
+                    </View>
                   ))}
                 </View>
               </Card>
-            ))
-          )}
-        </View>
+            ))}
+          </View>
+        )}
 
         <View style={{ height: 32 }} />
       </ScrollView>
     </SafeAreaView>
-  );
-}
-
-function QuickActionCard({ icon, title, onPress }: { icon: string; title: string; onPress: () => void }) {
-  const isDark = useThemeStore((state) => state.isDark);
-  const theme = getTheme(isDark);
-
-  return (
-    <TouchableOpacity 
-      style={[styles.quickAction, { backgroundColor: theme.surface, borderColor: theme.border }]}
-      onPress={onPress}
-      activeOpacity={0.7}
-    >
-      <View style={[styles.quickActionIcon, { backgroundColor: theme.primary + '20' }]}>
-        <Ionicons name={icon as any} size={24} color={theme.primary} />
-      </View>
-      <ThemedText size="sm" weight="medium">{title}</ThemedText>
-    </TouchableOpacity>
   );
 }
 
@@ -256,39 +262,30 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 16,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  hero: {
     marginBottom: 24,
   },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
+  heroTitle: {
+    marginBottom: 8,
   },
-  avatarImage: {
-    width: '100%',
-    height: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  quickActions: {
+  statsGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 12,
     marginBottom: 24,
   },
-  quickAction: {
-    flex: 1,
+  statCard: {
+    width: (width - 44) / 2,
     padding: 16,
     borderRadius: 16,
-    alignItems: 'center',
-    gap: 8,
     borderWidth: 1,
   },
-  quickActionIcon: {
+  statContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  statIcon: {
     width: 48,
     height: 48,
     borderRadius: 12,
@@ -298,59 +295,68 @@ const styles = StyleSheet.create({
   section: {
     marginBottom: 24,
   },
+  sectionTitle: {
+    marginBottom: 16,
+  },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 16,
+  },
+  actionsGrid: {
+    gap: 12,
+  },
+  actionCard: {
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  actionIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
     marginBottom: 12,
   },
-  sectionTitle: {
-    marginBottom: 12,
+  actionTitle: {
+    marginBottom: 4,
   },
-  inviteCard: {
-    marginBottom: 12,
+  howItWorks: {
+    marginBottom: 24,
+    padding: 20,
   },
-  inviteHeader: {
+  howItWorksHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    marginBottom: 8,
+    marginBottom: 20,
   },
-  inviteAvatar: {
+  stepsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  stepItem: {
+    width: '48%',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  stepNumber: {
     width: 40,
     height: 40,
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  inviteInfo: {
-    flex: 1,
-  },
-  inviteMessage: {
-    fontStyle: 'italic',
-    marginBottom: 12,
-  },
-  inviteActions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  teamCard: {
     marginBottom: 8,
   },
-  teamHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+  stepTitle: {
+    marginBottom: 4,
+    textAlign: 'center',
   },
-  teamIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  teamInfo: {
-    flex: 1,
+  stepDesc: {
+    textAlign: 'center',
   },
   projectCard: {
     marginBottom: 12,
@@ -362,16 +368,24 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   categoryBadge: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 6,
   },
-  projectTitle: {
-    marginBottom: 4,
+  memberCount: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   skillsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     marginTop: 12,
+    gap: 6,
+  },
+  skillBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
   },
 });

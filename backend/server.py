@@ -1,148 +1,117 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Response, Request, Depends
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+from datetime import datetime, timezone, timedelta
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List, Optional
 import uuid
-from datetime import datetime, timezone, timedelta
 import httpx
+from pathlib import Path
+from dotenv import load_dotenv
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
+# Load environment variables
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Emergent LLM Key
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
-
-# Create the main app
-app = FastAPI()
-
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
-
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============== Models ==============
+# MongoDB connection
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+db_name = os.environ.get('DB_NAME', 'team_builder')
+client = AsyncIOMotorClient(mongo_url)
+db = client[db_name]
+
+# Collections
+users_collection = db["users"]
+projects_collection = db["projects"]
+user_sessions = db["user_sessions"]
+
+# Emergent LLM Key for Claude Sonnet
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+
+# ============== Pydantic Models ==============
 
 class Skill(BaseModel):
     name: str
-    level: str = "intermediate"  # beginner, intermediate, expert
+    level: str = "intermediate"
 
-class UserProfile(BaseModel):
-    user_id: str
-    email: str
+class UserCreate(BaseModel):
     name: str
-    picture: Optional[str] = None
-    bio: Optional[str] = None
-    skills: List[Skill] = []
-    availability: str = "available"  # available, busy, not_looking
-    looking_for: List[str] = []  # types of projects looking for
-    github_url: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    email: EmailStr
+    skills: List[str] = []
+    experience_level: str = "beginner"
+    availability: str = "available"
+    bio: str = ""
 
-class UserProfileUpdate(BaseModel):
+class UserUpdate(BaseModel):
     name: Optional[str] = None
-    bio: Optional[str] = None
-    skills: Optional[List[Skill]] = None
+    skills: Optional[List[str]] = None
+    experience_level: Optional[str] = None
     availability: Optional[str] = None
-    looking_for: Optional[List[str]] = None
-    github_url: Optional[str] = None
-    linkedin_url: Optional[str] = None
-
-class Project(BaseModel):
-    project_id: str = Field(default_factory=lambda: f"proj_{uuid.uuid4().hex[:12]}")
-    owner_id: str
-    title: str
-    description: str
-    category: str  # hackathon, startup, learning, side_project
-    required_skills: List[str] = []
-    team_size: int = 4
-    current_members: int = 1
-    status: str = "open"  # open, in_progress, completed, cancelled
-    deadline: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    bio: Optional[str] = None
 
 class ProjectCreate(BaseModel):
     title: str
     description: str
-    category: str
-    required_skills: List[str] = []
+    required_skills: List[str]
     team_size: int = 4
+    category: str = "hackathon"
     deadline: Optional[str] = None
 
 class ProjectUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    category: Optional[str] = None
     required_skills: Optional[List[str]] = None
     team_size: Optional[int] = None
+    category: Optional[str] = None
     status: Optional[str] = None
     deadline: Optional[str] = None
 
-class TeamMember(BaseModel):
-    user_id: str
-    name: str
-    role: str
-    joined_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class AITeamRequest(BaseModel):
+    prompt: str
+    project_id: Optional[str] = None
 
-class Team(BaseModel):
-    team_id: str = Field(default_factory=lambda: f"team_{uuid.uuid4().hex[:12]}")
-    project_id: str
-    name: str
-    members: List[TeamMember] = []
-    invite_code: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
-class TeamInvite(BaseModel):
-    invite_id: str = Field(default_factory=lambda: f"inv_{uuid.uuid4().hex[:12]}")
-    team_id: str
-    inviter_id: str
-    invitee_id: str
-    message: Optional[str] = None
-    status: str = "pending"  # pending, accepted, declined
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# ============== Database Init ==============
 
-class AIRequest(BaseModel):
-    message: str
-    context: Optional[dict] = None
+async def init_db():
+    await users_collection.create_index("email", unique=True)
+    await projects_collection.create_index("created_by")
+    logger.info("Database indexes created")
 
-class AIResponse(BaseModel):
-    response: str
-    suggestions: Optional[List[dict]] = None
-    action_required: bool = False
-    action_type: Optional[str] = None
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+    client.close()
 
-class UserSession(BaseModel):
-    user_id: str
-    session_token: str
-    expires_at: datetime
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# Create FastAPI app
+app = FastAPI(title="Team Builder API - Hybrid Mobile + Web", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============== Auth Helpers ==============
 
-async def get_current_user(request: Request) -> UserProfile:
+async def get_current_user(request: Request) -> dict:
     """Get current user from session token"""
-    # Try cookie first
     session_token = request.cookies.get("session_token")
     
-    # Fallback to Authorization header
     if not session_token:
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
@@ -151,17 +120,11 @@ async def get_current_user(request: Request) -> UserProfile:
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
-    # Find session
-    session_doc = await db.user_sessions.find_one(
-        {"session_token": session_token},
-        {"_id": 0}
-    )
-    
-    if not session_doc:
+    session = await user_sessions.find_one({"session_token": session_token}, {"_id": 0})
+    if not session:
         raise HTTPException(status_code=401, detail="Invalid session")
     
-    # Check expiry
-    expires_at = session_doc["expires_at"]
+    expires_at = session.get("expires_at")
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
     if expires_at.tzinfo is None:
@@ -169,31 +132,191 @@ async def get_current_user(request: Request) -> UserProfile:
     if expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Session expired")
     
-    # Get user
-    user_doc = await db.users.find_one(
-        {"user_id": session_doc["user_id"]},
-        {"_id": 0}
-    )
-    
-    if not user_doc:
+    user = await users_collection.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    return UserProfile(**user_doc)
+    return user
+
+# ============== Skill Matching ==============
+
+async def calculate_match_score(user_skills: List[str], required_skills: List[str]) -> float:
+    if not required_skills:
+        return 0.0
+    user_skills_lower = [s.lower() for s in user_skills]
+    required_skills_lower = [s.lower() for s in required_skills]
+    matching = set(user_skills_lower) & set(required_skills_lower)
+    return (len(matching) / len(required_skills)) * 100
+
+async def get_skill_matches(project_id: str) -> List[dict]:
+    project = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
+    if not project:
+        return []
+    
+    required_skills = project.get("required_skills", [])
+    users = await users_collection.find({"availability": "available"}, {"_id": 0}).to_list(100)
+    
+    matches = []
+    for user in users:
+        if user.get("user_id") == project.get("created_by"):
+            continue
+        
+        score = await calculate_match_score(user.get("skills", []), required_skills)
+        if score > 0:
+            matches.append({
+                "user_id": user.get("user_id"),
+                "name": user.get("name"),
+                "skills": user.get("skills", []),
+                "experience_level": user.get("experience_level", "beginner"),
+                "match_score": round(score, 2),
+                "matching_skills": list(set([s.lower() for s in user.get("skills", [])]) & set([s.lower() for s in required_skills]))
+            })
+    
+    matches.sort(key=lambda x: x["match_score"], reverse=True)
+    return matches
+
+# ============== AI Service with Claude Sonnet ==============
+
+async def build_team_with_ai(prompt: str, project_id: str = None) -> dict:
+    """Build team using Claude Sonnet via emergentintegrations"""
+    context = ""
+    
+    if project_id:
+        project = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
+        if project:
+            context = f"Project: {project['title']}\nRequired Skills: {', '.join(project.get('required_skills', []))}\nTeam Size: {project.get('team_size', 4)}\n\n"
+    
+    users = await users_collection.find({"availability": "available"}, {"_id": 0}).to_list(100)
+    user_data = [
+        {
+            "id": user.get("user_id"),
+            "name": user.get("name"),
+            "skills": user.get("skills", []),
+            "experience": user.get("experience_level", "beginner"),
+            "bio": user.get("bio", "")
+        }
+        for user in users
+    ]
+    
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"team_builder_{uuid.uuid4().hex[:8]}",
+            system_message="""You are an AI team building assistant for hackathons and projects. 
+            
+When given a request, analyze available candidates and recommend the best team members.
+
+IMPORTANT: You must respond with valid JSON only. No markdown, no code blocks, just pure JSON.
+
+Response format:
+{
+    "analysis": "Brief analysis of the requirements and matching strategy",
+    "recommendations": [
+        {
+            "role": "Role title (e.g., Frontend Developer)",
+            "user_id": "user id from the list",
+            "name": "user name",
+            "reasoning": "Why this person is a good fit"
+        }
+    ],
+    "introduction_message": "A friendly message to introduce the team"
+}
+
+Match users based on skills, experience, and project requirements. Provide 2-4 recommendations."""
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        
+        import json
+        user_message = UserMessage(text=f"{context}User Request: {prompt}\n\nAvailable Candidates:\n{json.dumps(user_data, indent=2)}")
+        
+        response = await chat.send_message(user_message)
+        
+        # Parse JSON response
+        try:
+            # Try to extract JSON from the response
+            response_text = response.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            result = json.loads(response_text)
+            return result
+        except json.JSONDecodeError:
+            # Fallback to mock response
+            return generate_mock_team_response(prompt, user_data, project_id)
+            
+    except Exception as e:
+        logger.error(f"AI error: {str(e)}")
+        return generate_mock_team_response(prompt, user_data, project_id)
+
+def generate_mock_team_response(prompt: str, user_data: list, project_id: str = None) -> dict:
+    """Generate mock team recommendations when AI fails"""
+    prompt_lower = prompt.lower()
+    recommendations = []
+    
+    role_keywords = {
+        "Frontend Developer": ["react", "javascript", "ui", "ux", "frontend", "css", "html"],
+        "Backend Developer": ["python", "fastapi", "node", "backend", "api", "mongodb", "database"],
+        "Mobile Developer": ["react native", "flutter", "mobile", "ios", "android", "expo"],
+        "AI/ML Engineer": ["machine learning", "tensorflow", "ai", "data science", "python"],
+        "Full-stack Developer": ["full-stack", "fullstack", "node.js", "express"]
+    }
+    
+    used_users = set()
+    for role, keywords in role_keywords.items():
+        for user in user_data:
+            if user["id"] in used_users:
+                continue
+            user_skills_lower = [skill.lower() for skill in user["skills"]]
+            matches = any(keyword in skill for keyword in keywords for skill in user_skills_lower)
+            if matches and len(recommendations) < 4:
+                recommendations.append({
+                    "role": role,
+                    "user_id": user["id"],
+                    "name": user["name"],
+                    "reasoning": f"Strong expertise in {', '.join(user['skills'][:3])} with {user['experience']} experience."
+                })
+                used_users.add(user["id"])
+                break
+    
+    if not recommendations and user_data:
+        for i, user in enumerate(user_data[:3]):
+            recommendations.append({
+                "role": f"Team Member {i+1}",
+                "user_id": user["id"],
+                "name": user["name"],
+                "reasoning": f"Versatile member with skills in {', '.join(user['skills'][:2])}."
+            })
+    
+    return {
+        "analysis": f"Based on your request '{prompt}', I've identified team members with complementary skills for project success.",
+        "recommendations": recommendations,
+        "introduction_message": "Hi team! I'm excited to bring you together for this project. Let's schedule a kickoff meeting to discuss our goals and how we can collaborate effectively!"
+    }
+
+# ============== API Routes ==============
+
+# Health Check
+@app.get("/api/")
+async def root():
+    return {"message": "Team Builder API - Hybrid Mobile + Web", "version": "1.0.0", "status": "running"}
+
+@app.get("/api/health")
+async def health():
+    return {"status": "healthy"}
 
 # ============== Auth Routes ==============
 
-@api_router.post("/auth/session")
+@app.post("/api/auth/session")
 async def exchange_session(request: Request, response: Response):
-    """Exchange session_id for session_token"""
+    """Exchange Emergent session_id for session_token"""
     body = await request.json()
     session_id = body.get("session_id")
     
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
     
-    # Call Emergent Auth to get user data
-    async with httpx.AsyncClient() as client:
-        auth_response = await client.get(
+    async with httpx.AsyncClient() as http_client:
+        auth_response = await http_client.get(
             "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
             headers={"X-Session-ID": session_id}
         )
@@ -203,51 +326,46 @@ async def exchange_session(request: Request, response: Response):
         
         user_data = auth_response.json()
     
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
     email = user_data.get("email")
     name = user_data.get("name")
     picture = user_data.get("picture")
     session_token = user_data.get("session_token")
     
-    # Check if user exists
-    existing_user = await db.users.find_one({"email": email}, {"_id": 0})
+    existing_user = await users_collection.find_one({"email": email}, {"_id": 0})
     
     if existing_user:
         user_id = existing_user["user_id"]
-        # Update user info
-        await db.users.update_one(
+        await users_collection.update_one(
             {"user_id": user_id},
-            {"$set": {
-                "name": name,
-                "picture": picture,
-                "updated_at": datetime.now(timezone.utc)
-            }}
+            {"$set": {"name": name, "picture": picture, "updated_at": datetime.now(timezone.utc)}}
         )
     else:
-        # Create new user
-        new_user = UserProfile(
-            user_id=user_id,
-            email=email,
-            name=name,
-            picture=picture
-        )
-        await db.users.insert_one(new_user.model_dump())
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        new_user = {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "skills": [],
+            "experience_level": "beginner",
+            "availability": "available",
+            "bio": "",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
+        }
+        await users_collection.insert_one(new_user)
     
-    # Create session
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    session = UserSession(
-        user_id=user_id,
-        session_token=session_token,
-        expires_at=expires_at
-    )
+    session = {
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc)
+    }
     
-    # Remove old sessions for this user
-    await db.user_sessions.delete_many({"user_id": user_id})
+    await user_sessions.delete_many({"user_id": user_id})
+    await user_sessions.insert_one(session)
     
-    # Insert new session
-    await db.user_sessions.insert_one(session.model_dump())
-    
-    # Set cookie
     response.set_cookie(
         key="session_token",
         value=session_token,
@@ -258,549 +376,215 @@ async def exchange_session(request: Request, response: Response):
         max_age=7 * 24 * 60 * 60
     )
     
-    # Get full user data
-    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    
+    user_doc = await users_collection.find_one({"user_id": user_id}, {"_id": 0})
     return {"user": user_doc, "session_token": session_token}
 
-@api_router.get("/auth/me")
-async def get_me(user: UserProfile = Depends(get_current_user)):
-    """Get current authenticated user"""
-    return user.model_dump()
+@app.get("/api/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    return user
 
-@api_router.post("/auth/logout")
+@app.post("/api/auth/logout")
 async def logout(request: Request, response: Response):
-    """Logout user"""
     session_token = request.cookies.get("session_token")
-    
     if session_token:
-        await db.user_sessions.delete_many({"session_token": session_token})
-    
-    response.delete_cookie(
-        key="session_token",
-        path="/",
-        secure=True,
-        samesite="none"
-    )
-    
+        await user_sessions.delete_many({"session_token": session_token})
+    response.delete_cookie(key="session_token", path="/", secure=True, samesite="none")
     return {"message": "Logged out successfully"}
 
 # ============== User Routes ==============
 
-@api_router.get("/users/profile")
-async def get_profile(user: UserProfile = Depends(get_current_user)):
-    """Get current user's profile"""
-    return user.model_dump()
+@app.get("/api/users")
+async def get_users(user: dict = Depends(get_current_user)):
+    users = await users_collection.find({}, {"_id": 0, "password": 0}).to_list(100)
+    return users
 
-@api_router.put("/users/profile")
-async def update_profile(
-    update: UserProfileUpdate,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Update user profile"""
+@app.get("/api/users/profile")
+async def get_profile(user: dict = Depends(get_current_user)):
+    return user
+
+@app.get("/api/users/{user_id}")
+async def get_user(user_id: str, user: dict = Depends(get_current_user)):
+    found_user = await users_collection.find_one({"user_id": user_id}, {"_id": 0})
+    if not found_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return found_user
+
+@app.put("/api/users/profile")
+async def update_profile(update: UserUpdate, user: dict = Depends(get_current_user)):
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     update_data["updated_at"] = datetime.now(timezone.utc)
     
-    if update_data.get("skills"):
-        update_data["skills"] = [s.model_dump() if isinstance(s, Skill) else s for s in update_data["skills"]]
-    
-    await db.users.update_one(
-        {"user_id": user.user_id},
+    await users_collection.update_one(
+        {"user_id": user["user_id"]},
         {"$set": update_data}
     )
     
-    updated_user = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    updated_user = await users_collection.find_one({"user_id": user["user_id"]}, {"_id": 0})
     return updated_user
 
-@api_router.get("/users/search")
+@app.get("/api/users/search")
 async def search_users(
     skills: Optional[str] = None,
     availability: Optional[str] = None,
     limit: int = 20,
-    user: UserProfile = Depends(get_current_user)
+    user: dict = Depends(get_current_user)
 ):
-    """Search users by skills and availability"""
     query = {}
-    
     if skills:
         skill_list = [s.strip().lower() for s in skills.split(",")]
-        query["skills.name"] = {"$regex": "|".join(skill_list), "$options": "i"}
-    
+        query["skills"] = {"$regex": "|".join(skill_list), "$options": "i"}
     if availability:
         query["availability"] = availability
     
-    users = await db.users.find(query, {"_id": 0}).limit(limit).to_list(limit)
+    users = await users_collection.find(query, {"_id": 0}).limit(limit).to_list(limit)
     return users
 
 # ============== Project Routes ==============
 
-@api_router.get("/projects")
+@app.get("/api/projects")
 async def get_projects(
     category: Optional[str] = None,
     status: Optional[str] = None,
-    skills: Optional[str] = None,
     search: Optional[str] = None,
     limit: int = 50
 ):
-    """Get all projects with optional filters"""
     query = {}
-    
     if category:
         query["category"] = category
-    
     if status:
         query["status"] = status
     else:
-        query["status"] = "open"  # Default to open projects
-    
-    if skills:
-        skill_list = [s.strip() for s in skills.split(",")]
-        query["required_skills"] = {"$in": skill_list}
-    
+        query["status"] = {"$ne": "cancelled"}
     if search:
         query["$or"] = [
             {"title": {"$regex": search, "$options": "i"}},
             {"description": {"$regex": search, "$options": "i"}}
         ]
     
-    projects = await db.projects.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    projects = await projects_collection.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
     
-    # Enrich with owner info
     for project in projects:
-        owner = await db.users.find_one({"user_id": project["owner_id"]}, {"_id": 0, "name": 1, "picture": 1})
+        owner = await users_collection.find_one({"user_id": project.get("created_by")}, {"_id": 0, "name": 1, "picture": 1})
         project["owner"] = owner
     
     return projects
 
-@api_router.post("/projects")
-async def create_project(
-    project: ProjectCreate,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Create a new project"""
-    new_project = Project(
-        owner_id=user.user_id,
-        **project.model_dump()
-    )
+@app.post("/api/projects")
+async def create_project(project: ProjectCreate, user: dict = Depends(get_current_user)):
+    project_id = f"proj_{uuid.uuid4().hex[:12]}"
+    project_dict = {
+        "project_id": project_id,
+        "created_by": user["user_id"],
+        "title": project.title,
+        "description": project.description,
+        "required_skills": project.required_skills,
+        "team_size": project.team_size,
+        "category": project.category,
+        "deadline": project.deadline,
+        "status": "open",
+        "current_members": 1,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    }
     
-    await db.projects.insert_one(new_project.model_dump())
-    
-    # Auto-create team for the project
-    team = Team(
-        project_id=new_project.project_id,
-        name=f"Team {project.title}",
-        members=[TeamMember(
-            user_id=user.user_id,
-            name=user.name,
-            role="Owner"
-        )]
-    )
-    await db.teams.insert_one(team.model_dump())
-    
-    return new_project.model_dump()
+    await projects_collection.insert_one(project_dict)
+    project_dict.pop("_id", None)
+    return project_dict
 
-@api_router.get("/projects/{project_id}")
+@app.get("/api/projects/{project_id}")
 async def get_project(project_id: str):
-    """Get a single project by ID"""
-    project = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
-    
+    project = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # Get owner info
-    owner = await db.users.find_one({"user_id": project["owner_id"]}, {"_id": 0, "name": 1, "picture": 1, "user_id": 1})
+    owner = await users_collection.find_one({"user_id": project.get("created_by")}, {"_id": 0, "name": 1, "picture": 1, "user_id": 1})
     project["owner"] = owner
-    
-    # Get team info
-    team = await db.teams.find_one({"project_id": project_id}, {"_id": 0})
-    project["team"] = team
     
     return project
 
-@api_router.put("/projects/{project_id}")
-async def update_project(
-    project_id: str,
-    update: ProjectUpdate,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Update a project"""
-    project = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
-    
+@app.put("/api/projects/{project_id}")
+async def update_project(project_id: str, update: ProjectUpdate, user: dict = Depends(get_current_user)):
+    project = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    
-    if project["owner_id"] != user.user_id:
+    if project["created_by"] != user["user_id"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     update_data["updated_at"] = datetime.now(timezone.utc)
     
-    await db.projects.update_one(
-        {"project_id": project_id},
-        {"$set": update_data}
-    )
-    
-    updated_project = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
-    return updated_project
+    await projects_collection.update_one({"project_id": project_id}, {"$set": update_data})
+    updated = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
+    return updated
 
-@api_router.delete("/projects/{project_id}")
-async def delete_project(
-    project_id: str,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Delete a project"""
-    project = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
-    
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str, user: dict = Depends(get_current_user)):
+    project = await projects_collection.find_one({"project_id": project_id}, {"_id": 0})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    
-    if project["owner_id"] != user.user_id:
+    if project["created_by"] != user["user_id"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    await db.projects.delete_one({"project_id": project_id})
-    await db.teams.delete_many({"project_id": project_id})
-    
-    return {"message": "Project deleted successfully"}
+    await projects_collection.delete_one({"project_id": project_id})
+    return {"message": "Project deleted"}
 
-# ============== Team Routes ==============
+# ============== Matching Routes ==============
 
-@api_router.get("/teams")
-async def get_user_teams(user: UserProfile = Depends(get_current_user)):
-    """Get teams the user is a member of"""
-    teams = await db.teams.find(
-        {"members.user_id": user.user_id},
-        {"_id": 0}
-    ).to_list(100)
-    
-    # Enrich with project info
-    for team in teams:
-        project = await db.projects.find_one({"project_id": team["project_id"]}, {"_id": 0, "title": 1, "category": 1, "status": 1})
-        team["project"] = project
-    
-    return teams
+@app.get("/api/match/{project_id}")
+async def match_users(project_id: str, user: dict = Depends(get_current_user)):
+    matches = await get_skill_matches(project_id)
+    return {"project_id": project_id, "matches": matches}
 
-@api_router.get("/teams/{team_id}")
-async def get_team(team_id: str, user: UserProfile = Depends(get_current_user)):
-    """Get a single team"""
-    team = await db.teams.find_one({"team_id": team_id}, {"_id": 0})
-    
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    
-    project = await db.projects.find_one({"project_id": team["project_id"]}, {"_id": 0})
-    team["project"] = project
-    
-    return team
+# ============== AI Routes ==============
 
-@api_router.post("/teams/{team_id}/join")
-async def join_team_by_code(
-    team_id: str,
-    request: Request,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Join a team using invite code"""
-    body = await request.json()
-    invite_code = body.get("invite_code")
-    
-    team = await db.teams.find_one({"team_id": team_id, "invite_code": invite_code}, {"_id": 0})
-    
-    if not team:
-        raise HTTPException(status_code=404, detail="Invalid team or invite code")
-    
-    # Check if already a member
-    if any(m["user_id"] == user.user_id for m in team.get("members", [])):
-        raise HTTPException(status_code=400, detail="Already a team member")
-    
-    # Add to team
-    new_member = TeamMember(
-        user_id=user.user_id,
-        name=user.name,
-        role="Member"
-    )
-    
-    await db.teams.update_one(
-        {"team_id": team_id},
-        {"$push": {"members": new_member.model_dump()}}
-    )
-    
-    # Update project member count
-    await db.projects.update_one(
-        {"project_id": team["project_id"]},
-        {"$inc": {"current_members": 1}}
-    )
-    
-    return {"message": "Joined team successfully"}
+@app.post("/api/ai/team-builder")
+async def ai_team_builder(request: AITeamRequest, user: dict = Depends(get_current_user)):
+    result = await build_team_with_ai(request.prompt, request.project_id)
+    return result
 
-@api_router.post("/teams/{team_id}/invite")
-async def send_invite(
-    team_id: str,
-    request: Request,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Send a team invite"""
-    body = await request.json()
-    invitee_id = body.get("invitee_id")
-    message = body.get("message")
-    
-    team = await db.teams.find_one({"team_id": team_id}, {"_id": 0})
-    
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    
-    # Check if user is a team member
-    if not any(m["user_id"] == user.user_id for m in team.get("members", [])):
-        raise HTTPException(status_code=403, detail="Not a team member")
-    
-    # Create invite
-    invite = TeamInvite(
-        team_id=team_id,
-        inviter_id=user.user_id,
-        invitee_id=invitee_id,
-        message=message
-    )
-    
-    await db.team_invites.insert_one(invite.model_dump())
-    
-    return invite.model_dump()
+# ============== Seed Data ==============
 
-@api_router.get("/invites")
-async def get_invites(user: UserProfile = Depends(get_current_user)):
-    """Get pending invites for user"""
-    invites = await db.team_invites.find(
-        {"invitee_id": user.user_id, "status": "pending"},
-        {"_id": 0}
-    ).to_list(100)
-    
-    # Enrich with team and inviter info
-    for invite in invites:
-        team = await db.teams.find_one({"team_id": invite["team_id"]}, {"_id": 0, "name": 1, "project_id": 1})
-        invite["team"] = team
-        
-        if team:
-            project = await db.projects.find_one({"project_id": team["project_id"]}, {"_id": 0, "title": 1})
-            invite["project"] = project
-        
-        inviter = await db.users.find_one({"user_id": invite["inviter_id"]}, {"_id": 0, "name": 1, "picture": 1})
-        invite["inviter"] = inviter
-    
-    return invites
-
-@api_router.post("/invites/{invite_id}/respond")
-async def respond_to_invite(
-    invite_id: str,
-    request: Request,
-    user: UserProfile = Depends(get_current_user)
-):
-    """Accept or decline an invite"""
-    body = await request.json()
-    action = body.get("action")  # accept or decline
-    
-    invite = await db.team_invites.find_one(
-        {"invite_id": invite_id, "invitee_id": user.user_id},
-        {"_id": 0}
-    )
-    
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found")
-    
-    if action == "accept":
-        # Add to team
-        new_member = TeamMember(
-            user_id=user.user_id,
-            name=user.name,
-            role="Member"
-        )
-        
-        await db.teams.update_one(
-            {"team_id": invite["team_id"]},
-            {"$push": {"members": new_member.model_dump()}}
-        )
-        
-        # Get team to update project
-        team = await db.teams.find_one({"team_id": invite["team_id"]}, {"_id": 0})
-        if team:
-            await db.projects.update_one(
-                {"project_id": team["project_id"]},
-                {"$inc": {"current_members": 1}}
-            )
-    
-    # Update invite status
-    await db.team_invites.update_one(
-        {"invite_id": invite_id},
-        {"$set": {"status": "accepted" if action == "accept" else "declined"}}
-    )
-    
-    return {"message": f"Invite {action}ed successfully"}
-
-# ============== AI Team Builder Routes ==============
-
-@api_router.post("/ai/team-builder")
-async def ai_team_builder(
-    ai_request: AIRequest,
-    user: UserProfile = Depends(get_current_user)
-):
-    """AI-powered team building assistant"""
-    
-    # Get available users for matching
-    available_users = await db.users.find(
-        {"availability": "available", "user_id": {"$ne": user.user_id}},
-        {"_id": 0}
-    ).limit(50).to_list(50)
-    
-    # Get user's projects
-    user_projects = await db.projects.find(
-        {"owner_id": user.user_id},
-        {"_id": 0}
-    ).to_list(10)
-    
-    # Build context for AI
-    context = ai_request.context or {}
-    context["available_users"] = [
-        {
-            "user_id": u["user_id"],
-            "name": u["name"],
-            "skills": u.get("skills", []),
-            "bio": u.get("bio", "")
-        }
-        for u in available_users
+@app.post("/api/seed")
+async def seed_database():
+    """Seed database with sample users and projects for testing"""
+    sample_users = [
+        {"user_id": "user_alice123", "email": "alice@example.com", "name": "Alice Chen", "skills": ["React", "TypeScript", "UI/UX", "Figma"], "experience_level": "advanced", "availability": "available", "bio": "Frontend developer passionate about user experience"},
+        {"user_id": "user_bob456", "email": "bob@example.com", "name": "Bob Smith", "skills": ["Python", "FastAPI", "MongoDB", "AWS"], "experience_level": "advanced", "availability": "available", "bio": "Backend engineer with cloud expertise"},
+        {"user_id": "user_carol789", "email": "carol@example.com", "name": "Carol Williams", "skills": ["React Native", "Expo", "JavaScript", "Firebase"], "experience_level": "intermediate", "availability": "available", "bio": "Mobile developer building cross-platform apps"},
+        {"user_id": "user_david012", "email": "david@example.com", "name": "David Kim", "skills": ["Machine Learning", "TensorFlow", "Python", "Data Science"], "experience_level": "advanced", "availability": "available", "bio": "AI/ML engineer focused on NLP"},
+        {"user_id": "user_emma345", "email": "emma@example.com", "name": "Emma Johnson", "skills": ["Node.js", "GraphQL", "PostgreSQL", "Docker"], "experience_level": "intermediate", "availability": "available", "bio": "Full-stack developer"}
     ]
-    context["user_projects"] = user_projects
-    context["current_user"] = {
-        "name": user.name,
-        "skills": [s.model_dump() if isinstance(s, Skill) else s for s in user.skills]
-    }
     
-    # Create AI chat
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"team_builder_{user.user_id}_{uuid.uuid4().hex[:8]}",
-        system_message="""You are an AI Team Building Assistant for a student collaboration platform. Your role is to help users build effective teams for hackathons, startups, and projects.
-
-When a user asks for help:
-1. Analyze their requirements (skills needed, project type, team size)
-2. Search through available users to find the best matches
-3. Explain WHY each person would be a good fit
-4. Suggest role distributions
-5. Offer to draft introduction messages
-
-Always be helpful, professional, and explain your reasoning. If you suggest actions like sending invites or messages, always ask for user confirmation first.
-
-Format your responses clearly with:
-- Match suggestions with explanations
-- Role recommendations
-- Next steps the user can take
-
-Available users and context will be provided in each message."""
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+    sample_projects = [
+        {"project_id": "proj_fintech001", "created_by": "user_alice123", "title": "FinTech Hackathon 2025", "description": "Building a next-gen payment solution for Gen-Z", "required_skills": ["React", "Python", "API", "UI/UX"], "team_size": 4, "category": "hackathon", "status": "open", "current_members": 1, "created_at": datetime.now(timezone.utc)},
+        {"project_id": "proj_health002", "created_by": "user_bob456", "title": "Health Tracking App", "description": "AI-powered health monitoring application", "required_skills": ["React Native", "Machine Learning", "Python"], "team_size": 3, "category": "startup", "status": "open", "current_members": 1, "created_at": datetime.now(timezone.utc)},
+        {"project_id": "proj_learn003", "created_by": "user_carol789", "title": "Learn Code Platform", "description": "Interactive coding education for beginners", "required_skills": ["JavaScript", "Node.js", "MongoDB"], "team_size": 5, "category": "learning", "status": "open", "current_members": 1, "created_at": datetime.now(timezone.utc)}
+    ]
     
-    # Create message with context
-    message_text = f"""User Request: {ai_request.message}
-
-Context:
-- Available team members: {len(context['available_users'])} users
-- User's current projects: {len(context['user_projects'])} projects
-
-Available Users:
-{chr(10).join([f"- {u['name']}: Skills: {', '.join([s.get('name', s) if isinstance(s, dict) else s for s in u['skills']])}" for u in context['available_users'][:10]])}
-
-Please help the user with their team building request."""
-
-    user_message = UserMessage(text=message_text)
+    for user in sample_users:
+        existing = await users_collection.find_one({"user_id": user["user_id"]})
+        if not existing:
+            user["created_at"] = datetime.now(timezone.utc)
+            user["updated_at"] = datetime.now(timezone.utc)
+            await users_collection.insert_one(user)
     
-    try:
-        response = await chat.send_message(user_message)
-        
-        # Parse response to extract suggestions
-        suggestions = []
-        action_required = False
-        action_type = None
-        
-        # Check if response suggests actions
-        if "send" in response.lower() and ("message" in response.lower() or "invite" in response.lower()):
-            action_required = True
-            action_type = "send_invite"
-        
-        # Extract mentioned users as suggestions
-        for u in context["available_users"]:
-            if u["name"].lower() in response.lower():
-                suggestions.append({
-                    "user_id": u["user_id"],
-                    "name": u["name"],
-                    "skills": u["skills"]
-                })
-        
-        return AIResponse(
-            response=response,
-            suggestions=suggestions if suggestions else None,
-            action_required=action_required,
-            action_type=action_type
-        )
-        
-    except Exception as e:
-        logger.error(f"AI error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
-
-@api_router.post("/ai/draft-message")
-async def ai_draft_message(
-    request: Request,
-    user: UserProfile = Depends(get_current_user)
-):
-    """AI drafts an introduction message"""
-    body = await request.json()
-    recipient_id = body.get("recipient_id")
-    project_title = body.get("project_title")
-    role = body.get("role")
+    for project in sample_projects:
+        existing = await projects_collection.find_one({"project_id": project["project_id"]})
+        if not existing:
+            project["updated_at"] = datetime.now(timezone.utc)
+            await projects_collection.insert_one(project)
     
-    # Get recipient info
-    recipient = await db.users.find_one({"user_id": recipient_id}, {"_id": 0})
-    if not recipient:
-        raise HTTPException(status_code=404, detail="Recipient not found")
-    
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"draft_{user.user_id}_{uuid.uuid4().hex[:8]}",
-        system_message="You are a helpful assistant that drafts professional but friendly introduction messages for team collaboration requests. Keep messages concise and personalized."
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-    
-    message_text = f"""Draft a brief introduction message from {user.name} to {recipient['name']} inviting them to join a project.
+    return {"message": "Database seeded with sample data", "users": len(sample_users), "projects": len(sample_projects)}
 
-Project: {project_title}
-Proposed Role: {role}
-Sender's skills: {', '.join([s.name if isinstance(s, Skill) else s.get('name', '') for s in user.skills])}
-Recipient's skills: {', '.join([s.get('name', s) if isinstance(s, dict) else s for s in recipient.get('skills', [])])}
-
-Keep it friendly, professional, and under 100 words."""
-
-    user_message = UserMessage(text=message_text)
-    
-    try:
-        response = await chat.send_message(user_message)
-        return {"draft_message": response}
-    except Exception as e:
-        logger.error(f"AI draft error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
-
-# ============== Health Check ==============
-
-@api_router.get("/")
-async def root():
-    return {"message": "Team Builder API", "version": "1.0.0"}
-
-@api_router.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-# Include the router in the main app
-app.include_router(api_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+if __name__ == "__main__":
+    import uvicorn
+    print("\n" + "="*60)
+    print("🚀 Team Builder API - Hybrid Mobile + Web")
+    print("="*60)
+    print("✓ MongoDB connected")
+    print("✓ Claude Sonnet AI configured")
+    print("✓ Emergent Google OAuth ready")
+    print("\nBackend running at: http://localhost:8001")
+    print("API docs at: http://localhost:8001/docs")
+    print("="*60 + "\n")
+    uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -1,33 +1,26 @@
-export interface Skill {
-  name: string;
-  level: 'beginner' | 'intermediate' | 'expert';
-}
-
 export interface User {
   user_id: string;
   email: string;
   name: string;
   picture?: string;
-  bio?: string;
-  skills: Skill[];
-  availability: 'available' | 'busy' | 'not_looking';
-  looking_for: string[];
-  github_url?: string;
-  linkedin_url?: string;
+  skills: string[];
+  experience_level: 'beginner' | 'intermediate' | 'advanced';
+  availability: 'available' | 'busy' | 'not_available';
+  bio: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface Project {
   project_id: string;
-  owner_id: string;
+  created_by: string;
   title: string;
   description: string;
-  category: 'hackathon' | 'startup' | 'learning' | 'side_project';
   required_skills: string[];
   team_size: number;
-  current_members: number;
+  category: 'hackathon' | 'startup' | 'learning' | 'side_project';
   status: 'open' | 'in_progress' | 'completed' | 'cancelled';
+  current_members: number;
   deadline?: string;
   created_at: string;
   updated_at: string;
@@ -36,58 +29,26 @@ export interface Project {
     picture?: string;
     user_id?: string;
   };
-  team?: Team;
 }
 
-export interface TeamMember {
+export interface MatchResult {
   user_id: string;
   name: string;
+  skills: string[];
+  experience_level: string;
+  match_score: number;
+  matching_skills: string[];
+}
+
+export interface AITeamRecommendation {
   role: string;
-  joined_at: string;
-}
-
-export interface Team {
-  team_id: string;
-  project_id: string;
+  user_id: string;
   name: string;
-  members: TeamMember[];
-  invite_code: string;
-  created_at: string;
-  project?: {
-    title: string;
-    category: string;
-    status: string;
-  };
+  reasoning: string;
 }
 
-export interface TeamInvite {
-  invite_id: string;
-  team_id: string;
-  inviter_id: string;
-  invitee_id: string;
-  message?: string;
-  status: 'pending' | 'accepted' | 'declined';
-  created_at: string;
-  team?: {
-    name: string;
-    project_id: string;
-  };
-  project?: {
-    title: string;
-  };
-  inviter?: {
-    name: string;
-    picture?: string;
-  };
-}
-
-export interface AIResponse {
-  response: string;
-  suggestions?: Array<{
-    user_id: string;
-    name: string;
-    skills: Skill[];
-  }>;
-  action_required: boolean;
-  action_type?: string;
+export interface AITeamResponse {
+  analysis: string;
+  recommendations: AITeamRecommendation[];
+  introduction_message: string;
 }
